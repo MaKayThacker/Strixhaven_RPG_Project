@@ -208,7 +208,7 @@
     /** Remove trailing ".c" (case-insensitive); returns base or null if not a combo suffix. */
     function stripComboSuffix(subType) {
         const m = /^(.+?)\.c$/i.exec(String(subType || ""));
-        return m ? m[1] : null;
+               return m ? m[1] : null;
     }
 
     /** Optional explicit combo target via meta (Combo_Subtype or similar). */
@@ -376,6 +376,21 @@
     };
 
     Ante.resetAnte = () => { Ante.setAnte(0); };
+
+    // ---- Dynamic damage steps (no header edits; defaults here) ----
+    //  - _dmgDealStep : +% per Ante level to damage DEALT by actors
+    //  - _dmgTakenStep: -% per Ante level to damage RECEIVED by actors (actors as targets)
+    Ante._dmgDealStep  = 0.05; // +5% per Ante by default
+    Ante._dmgTakenStep = 0.00; // 0% reduction per Ante by default
+
+    Ante.setDamageSteps = function (dealStep, takenStep) {
+        if (dealStep != null)  Ante._dmgDealStep  = Math.max(0, Number(dealStep)  || 0);
+        if (takenStep != null) Ante._dmgTakenStep = Math.max(0, Number(takenStep) || 0);
+    };
+
+    Ante.getDamageSteps = function () {
+        return { deal: Ante._dmgDealStep, taken: Ante._dmgTakenStep };
+    };
 
     // ---- Queue accessors ----
     Ante.globalHistory = () => Ante._globalQueue.slice();
@@ -957,22 +972,60 @@
         // Damage scaling & extra effects based on Ante level
         //==========================================================================
 
-        // ---- Flat damage multiplier per Ante level (5% per step) ----
-        const ANTE_STEP = 0.05;
+        // Healing scaling knobs (default to the damage knobs if not set)
+        if (Ante._healDealStep  === undefined) Ante._healDealStep  = (Ante._dmgDealStep  != null ? Ante._dmgDealStep  : 0.05);
+        if (Ante._healTakenStep === undefined) Ante._healTakenStep = (Ante._dmgTakenStep != null ? Ante._dmgTakenStep : 0.00);
+
+        // Optional: runtime setter if you want different heal scaling than damage
+        Ante.setHealingSteps = function (dealStep, takenStep) {
+            if (dealStep  != null) Ante._healDealStep  = Math.max(0, Number(dealStep)  || 0);
+            if (takenStep != null) Ante._healTakenStep = Math.max(0, Number(takenStep) || 0);
+        };
+
+
+        // === Dynamic Ante damage scaling ===
+        // Separate knobs:
+        //  - Ante._dmgDealStep  : bonus to damage DEALT by actors (per Ante level)
+        //  - Ante._dmgTakenStep : reduction to damage RECEIVED by actors (per Ante level)
         const _makeDamageValue = Game_Action.prototype.makeDamageValue;
         Game_Action.prototype.makeDamageValue = function (target, critical) {
             let value = _makeDamageValue.call(this, target, critical);
-            const ante = (window.Ante && typeof Ante.getAnte === "function") ? (Ante.getAnte() | 0) : 0;
-            if (!ante) return value;
 
-            // Apply only if either subject or target is an actor (player side)
+            const ante = (window.Ante && typeof Ante.getAnte === "function") ? (Ante.getAnte() | 0) : 0;
+            if (ante <= 0) return value;
+
             const subject = this.subject();
             const isSubjectActor = !!(subject && subject.isActor && subject.isActor());
-            const isTargetActor = !!(target && target.isActor && target.isActor());
-            if (!(isSubjectActor || isTargetActor)) return value;
+            const isTargetActor  = !!(target  && target.isActor  && target.isActor());
 
-            return Math.round(value * (1 + ANTE_STEP * ante));
+         if (value > 0) {
+                // --- Damage ---
+                // 1) Damage DEALT by actors: increase by (1 + dealStep * ante)
+                if (isSubjectActor && Ante._dmgDealStep > 0) {
+                   const mulDeal = 1 + (Ante._dmgDealStep * ante);
+                   value = Math.round(value * mulDeal);
+               }
+               // 2) Damage RECEIVED by actors: reduce by (1 - takenStep * ante), clamped ≥ 0
+                if (isTargetActor && Ante._dmgTakenStep > 0) {
+                    const mulTaken = Math.max(0, 1 - (Ante._dmgTakenStep * ante));
+                   value = Math.round(value * mulTaken);
+               }
+            } else if (value < 0) {
+               // --- Healing (value is negative; multiplying by >1 increases healing magnitude) ---
+               // 1) Healing DEALT by actors: increase by (1 + healDealStep * ante)
+               if (isSubjectActor && Ante._healDealStep > 0) {
+                   const mulHealGive = 1 + (Ante._healDealStep * ante);
+                    value = Math.round(value * mulHealGive); // value is negative -> more healing
+               }
+                // 2) Healing RECEIVED by actors: increase by (1 + healTakenStep * ante)
+                if (isTargetActor && Ante._healTakenStep > 0) {
+                    const mulHealRecv = 1 + (Ante._healTakenStep * ante);
+                    value = Math.round(value * mulHealRecv); // value is negative -> more healing
+                }
+            }
+            return value;
         };
+
 
         // ---- Status chance scaling & extra turns via meta ----
         function anteChanceMultiplierForItem(item) {
@@ -1093,7 +1146,7 @@
             try { runExtraCommonEventIfAny(this); } catch (_e) { }
         };
 
-        // Plugin commands (MZ)
+        // Plugin commands (MZ) — optional runtime tuning without header edits
         if (PluginManager.registerCommand) {
             PluginManager.registerCommand(PLUGIN_NAME, "AnteBeginConstruct", args => {
                 const maxSize = args?.maxSize != null ? Number(args.maxSize) : null;
@@ -1111,6 +1164,12 @@
             PluginManager.registerCommand(PLUGIN_NAME, "AnteSetBadge", args => {
                 const v = Number(args?.value || 0);
                 Ante.setBadge(v); _requestHudRefresh();
+            });
+            // Undocumented command (no header edits): set damage steps at runtime.
+            PluginManager.registerCommand(PLUGIN_NAME, "AnteSetDamageSteps", args => {
+                const deal  = (args && args.dealtStep  != null) ? Number(args.dealtStep)  : null;
+                const taken = (args && args.takenStep != null) ? Number(args.takenStep) : null;
+                Ante.setDamageSteps(deal, taken);
             });
         }
     } // <-- closes Turn lifecycle block
