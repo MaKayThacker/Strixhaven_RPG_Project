@@ -1,6 +1,6 @@
 ﻿/*:
  * @target MZ
- * @plugindesc Ante HUD v6.3 — global last-N Sub Skill Types (actors only). One-line panel, dynamic (%-based) layout, big badge (behind panel), fixed-length queue, turn hooks, mid-turn <Ante:+1|=N>, direct APIs.
+ * @plugindesc Ante HUD v7.0 — global last-N Sub Skill Types (actors only). One-line panel, dynamic (%-based) layout, big badge, fixed-length queue, turn hooks, Ante game w/ targets, combo wild+bonus, max ante 10.
  *
  * @param MaxQueueSize
  * @type number
@@ -15,8 +15,25 @@
  *
  * @help
  * Tags on skills/items:
- *   <Sub_Skill_Type: Heal>
- *   <Ante:+1> / <Ante:-2> / <Ante:=5>    // handled at mid-turn (on selection confirm)
+ *   <Sub_Skill_Type: Heal>   // base subtype
+ *   <Sub_Skill_Type: Attack|Heal|Utility|Status|Combo|Hold|...>
+ *
+ * Combo handling (wild + bonus on subtype match):
+ *   Use either:
+ *     <Sub_Skill_Type: Combo>
+ *     <Combo_Subtype: Heal>   // gives +1 extra IF current target is Heal
+ *   or the compact “.c” form:
+ *     <Sub_Skill_Type: Heal.c>   // counts as Combo; “Heal” is the combo-subtype
+ *   Aliases for Combo_Subtype: ComboAs, Combo_as
+ *
+ * Ante “target” game (actors only):
+ *   - The system picks a target from: Attack, Heal, Utility, Status (Combo excluded)
+ *   - If the player USES that type this turn: Ante +1 (cap 10), then it picks a
+ *     different type not yet used this round. After 4 correct uses, the round resets.
+ *   - “Combo” counts as the correct type (wild). If Combo has a matching subtype
+ *     for the current target, Ante +1 again (extra).
+ *   - If a WRONG type is used: Ante − 2 * (correctCountThisRound), then the round
+ *     progress resets and a new target is chosen.
  *
  * GLOBAL queue (actors only). Push at endAction only (no double count).
  * Queue is ALWAYS length N. Fill left→right; after the last cell is filled,
@@ -24,7 +41,7 @@
  *
  * Public hooks:
  *   Ante.onActorTurnStart(actor)
- *   Ante.onActorMidTurn(actor, item)   // handles <Ante:...> by default
+ *   Ante.onActorMidTurn(actor, item)   // handles <Ante:+1|=N> by default
  *   Ante.onActorTurnEnd(actor)
  *
  * Construction helpers:
@@ -43,7 +60,6 @@
  * Misc:
  *   Ante.setMaxSize(n);  Ante.setBadge(n); Ante.globalHistory()
  */
-
 (() => {
     const PLUGIN_NAME = "AnteHUD";
     const params = PluginManager.parameters(PLUGIN_NAME) || {};
@@ -52,24 +68,26 @@
 
     // ===== DYNAMIC LAYOUT KNOBS (resolution-independent) =====
     // Panel (window)
-    const PANEL_WIDTH_PCT = 0.50; // panel width = 50% of screen width
-    const PANEL_LINES = 1;    // height in "lines"
-    const PANEL_X_ANCHOR = 0.0;  // 0=left, 0.5=center, 1=right
-    const PANEL_X_MARGIN_PCT = 0.02; // margin from X anchor (% of screen width)
-    const PANEL_Y_ANCHOR = 1.0;  // 0=top, 1=bottom
-    const PANEL_Y_MARGIN_PCT = 0.03; // margin from Y anchor (% of screen height)
+    const PANEL_WIDTH_PCT = 0.50;
+    const PANEL_LINES = 1;
+    const PANEL_X_ANCHOR = 0.0;
+    const PANEL_X_MARGIN_PCT = 0.00;
+    const PANEL_Y_ANCHOR = 1.0;
+    const PANEL_Y_MARGIN_PCT = 0.00;
+    const PANEL_X_PADDING = 0.015;
+    const PANEL_Y_PADDING = 0.015;
 
     // Badge (circle)
-    const BADGE_SIZE_VMIN_PCT = 0.07; // radius = 7% of min(screenW,screenH)
-    const BADGE_REL_X = 1.02; // relative to panel width; 1.0 = panel right edge
-    const BADGE_REL_Y = 1.00; // 0=panel top, 1=panel bottom
-    const BADGE_CLAMP_ONSCREEN = true; // clamp while testing; set false to allow clipping
+    const BADGE_SIZE_VMIN_PCT = 0.060;
+    const BADGE_REL_X = 1.05;
+    const BADGE_REL_Y = 0.70;
+    const BADGE_CLAMP_ONSCREEN = false;
 
     // ---- helpers ----
     function _anchorPos(len, box, anchor, marginPx) {
-        if (anchor <= 0.25) return Math.round(marginPx);                    // left/top
-        if (anchor >= 0.75) return Math.round(box - len - marginPx);        // right/bottom
-        return Math.round((box - len) / 2 + marginPx);                      // center
+        if (anchor <= 0.25) return Math.round(marginPx);
+        if (anchor >= 0.75) return Math.round(box - len - marginPx);
+        return Math.round((box - len) / 2 + marginPx);
     }
     function _panelRect(scene) {
         const boxW = Graphics.boxWidth, boxH = Graphics.boxHeight;
@@ -77,8 +95,10 @@
         const h = scene.calcWindowHeight(PANEL_LINES, false);
         const mx = boxW * PANEL_X_MARGIN_PCT;
         const my = boxH * PANEL_Y_MARGIN_PCT;
-        const x = _anchorPos(w, boxW, PANEL_X_ANCHOR, mx);
-        const y = _anchorPos(h, boxH, PANEL_Y_ANCHOR, my);
+        let x = _anchorPos(w, boxW, PANEL_X_ANCHOR, mx);
+        let y = _anchorPos(h, boxH, PANEL_Y_ANCHOR, my);
+        x = Math.round(x - (PANEL_X_PADDING * boxW));
+        y = Math.round(y + (PANEL_Y_PADDING * boxH));
         return new Rectangle(x, y, w, h);
     }
     function _badgeRadius() {
@@ -106,11 +126,16 @@
     Ante._writeIdx = 0;
     Ante._filledOnce = false;
 
-    Ante._ante = 0; // counter exposed for damage, etc.
+    Ante._ante = 0; // exposed counter
     Ante._badgeNumber = 0;
     Ante._badgeManual = false;
 
     Ante._constructing = false;
+
+    // ====== New: Target Game State ======
+    const CORE_TYPES = ["Attack","Heal","Utility","Status"]; // non-Combo pool
+    Ante._targetType = null;          // string
+    Ante._roundUsed = new Set();      // which of the 4 have been correctly hit this round
 
     // =========================
     // Utilities
@@ -141,14 +166,36 @@
 
     const curActor = () => (BattleManager.actor ? BattleManager.actor() : null);
 
+    // Parse Sub_Skill_Type + special handling for Combo and ".c"
     function readSubtype(skillOrItem) {
         const t = skillOrItem?.meta?.Sub_Skill_Type;
-        if (t && typeof t === "string" && t.length) return t;
+        if (t && typeof t === "string" && t.length) return t.trim();
         if ($dataSystem && skillOrItem) {
             if (skillOrItem.id === $dataSystem.attackSkillId) return "Attack";
             if (skillOrItem.id === $dataSystem.guardSkillId) return "Hold";
         }
         return "None";
+    }
+
+    function isComboType(subType) {
+        if (!subType) return false;
+        if (String(subType).toLowerCase() === "combo") return true;
+        return /\.c$/i.test(String(subType));
+    }
+
+    // If Sub_Skill_Type is like "Heal.c", returns "Heal"
+    function stripComboSuffix(subType) {
+        const m = /^(.+?)\.c$/i.exec(String(subType || ""));
+        return m ? m[1] : null;
+    }
+
+    function comboDeclaredSubtype(item) {
+        const meta = item?.meta || {};
+        const direct =
+            meta.Combo_Subtype || meta.ComboAs || meta.Combo_as ||
+            stripComboSuffix(item?.meta?.Sub_Skill_Type);
+        if (!direct) return null;
+        return String(direct).trim();
     }
 
     function parseAnteTag(item) {
@@ -158,6 +205,32 @@
         if (/^= *-?\d+$/i.test(s)) return { op: "set", val: Number(s.replace("=", "")) };
         if (/^[+\-]\d+$/i.test(s)) return { op: "add", val: Number(s) };
         return null;
+    }
+
+    // ===== Target selection =====
+    function ensureTarget() {
+        if (Ante._targetType && CORE_TYPES.includes(Ante._targetType)) return;
+        Ante._targetType = _pickRandom(CORE_TYPES);
+    }
+    function _pickRandom(arr) {
+        if (!arr.length) return null;
+        const i = Math.floor(Math.random() * arr.length);
+        return arr[i];
+    }
+    function pickNextTargetDifferent() {
+        const remaining = CORE_TYPES.filter(t => !Ante._roundUsed.has(t));
+        if (remaining.length === 0) {
+            // Completed a round; reset and start a fresh pick
+            Ante._roundUsed.clear();
+            Ante._targetType = _pickRandom(CORE_TYPES);
+        } else {
+            // Pick any remaining (different by definition)
+            Ante._targetType = _pickRandom(remaining);
+        }
+    }
+    function resetRoundProgressAndPickNew() {
+        Ante._roundUsed.clear();
+        Ante._targetType = _pickRandom(CORE_TYPES);
     }
 
     // =========================
@@ -174,9 +247,14 @@
     // =========================
     // Public API — Ante counter
     // =========================
+    const ANTE_MAX = 10;
     Ante.getAnte = () => Ante._ante;
-    Ante.setAnte = (n) => { Ante._ante = Number(n) || 0; _requestHudRefresh(); };
-    Ante.addAnte = (n) => { Ante._ante = (Ante._ante + Number(n || 0)) | 0; _requestHudRefresh(); };
+    Ante.setAnte = (n) => { Ante._ante = clamp(Number(n) || 0, 0, ANTE_MAX); _requestHudRefresh(); };
+    Ante.addAnte = (n) => {
+        const v = (Ante._ante + Number(n || 0)) | 0;
+        Ante._ante = clamp(v, 0, ANTE_MAX);
+        _requestHudRefresh();
+    };
     Ante.resetAnte = () => { Ante._ante = 0; _requestHudRefresh(); };
 
     // =========================
@@ -238,6 +316,7 @@
     // =========================
     Ante.onActorTurnStart = (actor) => { /* custom start-of-turn logic here */ };
     Ante.onActorMidTurn = (actor, item) => {
+        // Supports <Ante:+1>, <Ante:-2>, <Ante:=5>, independent of the target game
         const t = parseAnteTag(item);
         if (t) {
             if (t.op === "set") Ante.setAnte(t.val);
@@ -247,24 +326,29 @@
     Ante.onActorTurnEnd = (actor) => { /* custom end-of-turn logic here */ };
 
     // =========================
-    // Window (1 line, centered) + Badge (behind, dynamic)
+    // Window (1 line, centered) + Badge (behind, dynamic) + Target banner
     // =========================
     class Window_Ante extends Window_Base {
         initialize(rect) {
             super.initialize(rect);
             this._lastKey = "";
-            this.refreshWith(Ante.globalHistory(), Ante._badgeNumber);
+            this.refreshWith(Ante.globalHistory(), Ante._badgeNumber, Ante._targetType);
         }
-        refreshWith(list, badge) {
+        refreshWith(list, badge, target) {
             const safe = (list && list.length) ? list : Array(Ante._maxQueueSize).fill("None");
             const text = safe.join(" | ");
             this.contents.clear();
 
-            // For a single line panel, draw centered vertically/horizontally
+            // one line panel text
             const lh = this.lineHeight();
-            const y = Math.max(0, Math.floor((this.contentsHeight() - lh) / 2)); // <-- () added
+            const y = Math.max(0, Math.floor((this.contentsHeight() - lh) / 2));
             this.changeTextColor(ColorManager.normalColor());
-            this.drawText(text, 0, y, this.contentsWidth(), "center");
+            this.drawText(text, 0, y, Math.floor(this.contentsWidth() * 0.6), "left");
+
+            // target banner (highlight)
+            const targetStr = `Target: ${target || "—"}`;
+            this.changeTextColor(ColorManager.systemColor());
+            this.drawText(targetStr, Math.floor(this.contentsWidth() * 0.60), y, Math.floor(this.contentsWidth() * 0.40), "right");
             this.resetTextColor();
         }
     }
@@ -287,8 +371,12 @@
             const b = this.bitmap, r = this._r;
             b.clear();
             const cx = r + 11, cy = r + 11;
-            b.drawCircle(cx, cy, r, ColorManager.systemColor());      // outer ring
-            b.drawCircle(cx, cy, r - 3, ColorManager.gaugeBackColor());   // inner fill
+            if (b.drawCircle) {
+                b.drawCircle(cx, cy, r, ColorManager.systemColor());
+                b.drawCircle(cx, cy, r - 3, ColorManager.gaugeBackColor());
+            } else {
+                b.fillRect(cx - r, cy - r, r * 2, r * 2, ColorManager.gaugeBackColor());
+            }
             b.textColor = ColorManager.normalColor();
             b.fontSize = Math.max(18, Math.floor(r * 0.58));
             b.fontBold = true;
@@ -307,14 +395,18 @@
             this._badge = null;
             this._cacheKey = "";
             this._cacheBadge = -1;
+            this._cacheTarget = "";
         }
         create() {
-            // 1) Panel (dynamic rect)
+            // initial target ready
+            ensureTarget();
+
+            // 1) Panel
             const rect = _panelRect(this._scene);
             this._win = new Window_Ante(rect);
             this._scene.addWindow(this._win);
 
-            // 2) Badge (behind panel)
+            // 2) Badge
             this._badge = new Sprite_AnteBadge();
             this._badge.setRadius(_badgeRadius());
             if (this._scene._spriteset) this._scene._spriteset.addChild(this._badge);
@@ -332,18 +424,21 @@
         forceRefresh() {
             this._cacheKey = "";
             this._cacheBadge = -1;
-            if (this._win) this._win.refreshWith(Ante.globalHistory(), Ante._badgeNumber);
+            this._cacheTarget = "";
+            if (this._win) this._win.refreshWith(Ante.globalHistory(), Ante._badgeNumber, Ante._targetType);
             if (this._badge) this._badge.setValue(Ante._badgeNumber);
             this._positionBadge();
         }
         update() {
             const hist = Ante.globalHistory();
             const badge = Ante._badgeNumber;
+            const target = Ante._targetType || "";
             const key = `R:${hist.join("||")}`;
-            if (key !== this._cacheKey || badge !== this._cacheBadge) {
+            if (key !== this._cacheKey || badge !== this._cacheBadge || target !== this._cacheTarget) {
                 this._cacheKey = key;
                 this._cacheBadge = badge;
-                if (this._win) this._win.refreshWith(hist, badge);
+                this._cacheTarget = target;
+                if (this._win) this._win.refreshWith(hist, badge, target);
                 if (this._badge) this._badge.setValue(badge);
                 this._positionBadge();
             }
@@ -375,6 +470,7 @@
             _start.call(this);
             if (Ante._constructing) Ante.endConstruct();
             Ante._updateBadgeAuto();
+            ensureTarget();
             _requestHudRefresh();
         };
 
@@ -402,12 +498,13 @@
             const a = BattleManager.actor && BattleManager.actor();
             if (a && a.isActor && a.isActor()) {
                 try { Ante.onActorTurnStart(a); } catch (e) { console.warn("Ante turnStart hook failed:", e); }
+                ensureTarget();
                 _requestHudRefresh();
             }
             _startActorCommandSelection.call(this);
         };
 
-        // Mid-turn (after selection)
+        // Mid-turn (after selection) — leave Ante tag handling
         const mid = (actor, item) => {
             try { Ante.onActorMidTurn(actor, item); } catch (e) { console.warn("Ante midTurn hook failed:", e); }
             _requestHudRefresh();
@@ -445,7 +542,7 @@
             _onItemOk.call(this);
         };
 
-        // End-of-actor-turn
+        // End-of-actor-turn: evaluate actual use, push queue, update Ante/targets
         const _endAction = BattleManager.endAction;
         BattleManager.endAction = function () {
             try {
@@ -454,14 +551,62 @@
                 if (subject && subject.isActor && subject.isActor() && action) {
                     const item = action.item && action.item();
                     if (item && (DataManager.isSkill(item) || DataManager.isItem(item))) {
-                        _pushFixed(readSubtype(item));
+                        const sub = readSubtype(item);
+                        // Queue push (always tracks actual used)
+                        _pushFixed(sub);
                         Ante._badgeManual = false;
                         Ante._updateBadgeAuto();
-                        _requestHudRefresh();
+
+                        // ===== Target game evaluation =====
+                        ensureTarget();
+                        const target = Ante._targetType;
+                        let correct = false;
+                        let extraComboHit = false;
+
+                        // Determine correctness
+                        if (isComboType(sub)) {
+                            correct = true; // wild
+                            // bonus if combo-subtype matches current target
+                            const comboSub = comboDeclaredSubtype(item);
+                            if (comboSub && String(comboSub).toLowerCase() === String(target).toLowerCase()) {
+                                extraComboHit = true;
+                            }
+                        } else {
+                            // Normal match only counts if it’s one of the 4 and equals target
+                            if (CORE_TYPES.includes(sub) && String(sub).toLowerCase() === String(target).toLowerCase()) {
+                                correct = true;
+                            }
+                        }
+
+                        if (correct) {
+                            // +1 for correct
+                            Ante.addAnte(1);
+                            if (extraComboHit) Ante.addAnte(1); // additional +1
+                            // Track round progress
+                            if (CORE_TYPES.includes(target)) Ante._roundUsed.add(target);
+
+                            // If all 4 done, reset the round progress
+                            if (Ante._roundUsed.size >= 4) {
+                                Ante._roundUsed.clear();
+                            }
+
+                            // Pick next target not yet used this round
+                            pickNextTargetDifferent();
+                        } else {
+                            // Penalty = -2 * correctCountThisRound
+                            const count = Ante._roundUsed.size;
+                            if (count > 0) Ante.addAnte(-2 * count);
+                            // Reset round progress and pick a fresh target
+                            resetRoundProgressAndPickNew();
+                        }
+
+                        // User hook
                         try { Ante.onActorTurnEnd(subject); } catch (e) { console.warn("Ante turnEnd hook failed:", e); }
+
+                        _requestHudRefresh();
                     }
                 }
-            } catch (e) { console.warn("Ante endAction push failed:", e); }
+            } catch (e) { console.warn("Ante endAction push/eval failed:", e); }
             _endAction.call(this);
         };
     }
