@@ -1,10 +1,10 @@
 {
   "Version": 1,
-  "WorkspaceRootPath": "C:\\Users\\McKay\\Desktop\\Strixhaven\\Strixhaven_RPG_Project\\Strix_Take_3\\",
+  "WorkspaceRootPath": "C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\McKay\\Desktop\\Strixhaven\\Strixhaven_RPG_Project\\Strix_Take_3\\js\\plugins\\AnteSystem.js||{3B902123-F8A7-4915-9F01-361F908088D0}",
-      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:js\\plugins\\AnteSystem.js||{3B902123-F8A7-4915-9F01-361F908088D0}"
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\js\\plugins\\AnteSystem.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:js\\plugins\\AnteSystem.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}"
     }
   ],
   "DocumentGroupContainers": [
@@ -28,13 +28,13 @@
               "$type": "Document",
               "DocumentIndex": 0,
               "Title": "AnteSystem.js",
-              "DocumentMoniker": "C:\\Users\\McKay\\Desktop\\Strixhaven\\Strixhaven_RPG_Project\\Strix_Take_3\\js\\plugins\\AnteSystem.js",
+              "DocumentMoniker": "C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\js\\plugins\\AnteSystem.js",
               "RelativeDocumentMoniker": "js\\plugins\\AnteSystem.js",
-              "ToolTip": "C:\\Users\\McKay\\Desktop\\Strixhaven\\Strixhaven_RPG_Project\\Strix_Take_3\\js\\plugins\\AnteSystem.js",
+              "ToolTip": "C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\js\\plugins\\AnteSystem.js",
               "RelativeToolTip": "js\\plugins\\AnteSystem.js",
-              "ViewState": "AgIAAFACAAAAAAAAAAAgwH8CAAAAAAAAAAAAAA==",
+              "ViewState": "AgIAAOQAAAAAAAAAAAAiwBsAAAAdAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001646|",
-              "WhenOpened": "2025-11-11T17:32:02.209Z",
+              "WhenOpened": "2025-11-12T02:29:23.75Z",
               "EditorCaption": ""
             }
           ]
