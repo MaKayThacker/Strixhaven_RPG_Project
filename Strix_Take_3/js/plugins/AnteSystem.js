@@ -24,8 +24,8 @@
 
 /*
 # === Ante Tag Reference ===
-# < Sub_Skill_Type: Attack | Heal | Utility | Status > -> Skill’s subtype for Ante queue
-# < Ante: +N > or < Ante: =N > -> Modify or set Ante mid - turn
+# < Sub_Skill_Type: Attack | Heal | Buff | Debuff | Status > -> Skill’s subtype for Ante queue
+# < Ante: +N > or < Ante: =N > -> Modify or set Ante at end of action (after damage)
 # < ForceNextAnteSkill: Type > -> Force next lane slot to Type
 # < BlacklistAnteType: TypeA, TypeB > -> Block these types for the rest of the round
 # < QueueBlacklistAdd: TypeA, TypeB > -> Add to global queue blacklist
@@ -48,16 +48,37 @@
     // Plugin parameters & layout constants (do not change names/values here)
     //==========================================================================
     const PLUGIN_NAME = "AnteSystem";
-    const params = PluginManager.parameters(PLUGIN_NAME) || {};
+
+    // More robust parameter lookup so MaxQueueSize works even if the
+    // plugin's filename/internal name isn't exactly "AnteSystem".
+    function getAnteParams() {
+        // First try the declared plugin name.
+        let p = PluginManager.parameters(PLUGIN_NAME);
+
+        // If that failed (empty object), scan all plugins for one that
+        // actually defines a MaxQueueSize parameter.
+        if (!p || Object.keys(p).length === 0) {
+            const all = PluginManager._parameters || {};
+            for (const key in all) {
+                if (all[key] && Object.prototype.hasOwnProperty.call(all[key], "MaxQueueSize")) {
+                    p = all[key];
+                    break;
+                }
+            }
+        }
+        return p || {};
+    }
+
+    const params = getAnteParams();
     const paramMax = Math.max(1, Number(params.MaxQueueSize || 4));
     const badgeIsNonNone = String(params.BadgeShowsNonNoneCount || "true") === "true";
 
     // ----- HUD window (panel) placement as percentages of screen size -----
     const PANEL_WIDTH_PCT = 0.60;  // width relative to Graphics.boxWidth
-    const PANEL_LINES = 1;     // Window_Base line count for height calc
-    const PANEL_X_ANCHOR = 0.0;   // 0=left, 0.5=center, 1=right
+    const PANEL_LINES = 1;         // Window_Base line count for height calc
+    const PANEL_X_ANCHOR = 0.0;    // 0=left, 0.5=center, 1=right
     const PANEL_X_MARGIN_PCT = 0.00;  // margin from anchor on X axis
-    const PANEL_Y_ANCHOR = 1.0;   // 0=top, 1=bottom
+    const PANEL_Y_ANCHOR = 1.0;    // 0=top, 1=bottom
     const PANEL_Y_MARGIN_PCT = 0.00;  // margin from anchor on Y axis
     const PANEL_X_PADDING = 0.015; // extra negative offset (shifts left)
     const PANEL_Y_PADDING = 0.015; // extra positive offset (shifts down)
@@ -69,16 +90,41 @@
     const BADGE_CLAMP_ONSCREEN = false; // if true, keeps the badge inside
 
     //==========================================================================
+    // ICON INDEX CONFIG (EDIT THIS BLOCK WHEN YOUR ICONS CHANGE)
+    //==========================================================================
+    const ICON_ATTACK = 76;  // TODO: set to your Attack subtype icon
+    const ICON_HEAL = 84;  // TODO: set to your Heal subtype icon
+    const ICON_BUFF = 73;  // TODO: set to your Buff subtype icon
+    const ICON_DEBUFF = 74;  // TODO: set to your Debuff subtype icon
+    const ICON_STATUS = 10;  // TODO: set to your Status subtype icon
+
+    const ICON_HOLD = 0;   // 0 = no icon (unused in lane by default)
+    const ICON_COMBO = 0;   // for any generic "Combo" label if needed
+
+    /** Map subtype label -> icon index. */
+    function subtypeIconIndex(label) {
+        const key = String(label || "None").toLowerCase();
+        switch (key) {
+            case "attack": return ICON_ATTACK;
+            case "heal": return ICON_HEAL;
+            case "buff": return ICON_BUFF;
+            case "debuff": return ICON_DEBUFF;
+            case "status": return ICON_STATUS;
+            case "hold": return ICON_HOLD;
+            case "combo": return ICON_COMBO;
+            default: return 0; // 0 => no icon, falls back to text if needed
+        }
+    }
+
+    //==========================================================================
     // Geometry helpers for HUD layout
     //==========================================================================
-    /** Anchor a rectangle along one axis given a target length and screen box. */
     function _anchorPos(len, box, anchor, marginPx) {
         if (anchor <= 0.25) return Math.round(marginPx);                    // left/top
         if (anchor >= 0.75) return Math.round(box - len - marginPx);        // right/bottom
         return Math.round((box - len) / 2 + marginPx);                      // center
     }
 
-    /** Compute the Window rectangle for the HUD panel. */
     function _panelRect(scene) {
         const boxW = Graphics.boxWidth, boxH = Graphics.boxHeight;
         const w = Math.max(120, Math.floor(boxW * PANEL_WIDTH_PCT));
@@ -89,19 +135,16 @@
         let x = _anchorPos(w, boxW, PANEL_X_ANCHOR, mx);
         let y = _anchorPos(h, boxH, PANEL_Y_ANCHOR, my);
 
-        // fine offsets to tuck the panel slightly off anchor if desired
         x = Math.round(x - (PANEL_X_PADDING * boxW));
         y = Math.round(y + (PANEL_Y_PADDING * boxH));
         return new Rectangle(x, y, w, h);
     }
 
-    /** Badge radius based on viewport minimum dimension. */
     function _badgeRadius() {
         const vmin = Math.min(Graphics.boxWidth, Graphics.boxHeight);
         return Math.max(16, Math.floor(vmin * BADGE_SIZE_VMIN_PCT));
     }
 
-    /** Badge world coordinates (relative to the window rectangle). */
     function _badgePose(win, r) {
         let bx = win.x + win.width * BADGE_REL_X;
         let by = win.y + win.height * BADGE_REL_Y;
@@ -123,21 +166,30 @@
     Ante._globalQueue = Array(Ante._maxQueueSize).fill("None");
     Ante._writeIdx = 0;
 
+    // ---- Lane size (number of slots in the HUD lane / round plan) ----
+    // By default, lane size == MaxQueueSize so changing the parameter
+    // to 5 will give you 5 symbols in the lane.
+    Ante._laneSize = paramMax;
+
+    function laneSize() {
+        return Math.max(1, (Ante._laneSize | 0));
+    }
+
     // ---- Ante gauge (0..10) ----
     Ante._ante = 0;
     const ANTE_MAX = 10;
 
     // ---- Badge control ----
-    Ante._badgeNumber = 0;     // drawn number (auto or manual)
-    Ante._badgeManual = false; // manual override flag
+    Ante._badgeNumber = 0;
+    Ante._badgeManual = false;
 
     // ---- Construction mode for building a queue seed via plugin commands ----
     Ante._constructing = false;
 
     // ---- Round / lane state ----
-    const CORE_TYPES = ["Attack", "Heal", "Utility", "Status"]; // canonical types
-    Ante._roundPlan = [];   // e.g., 4 cells like ["Attack","Heal","...","..."]
-    Ante._roundIndex = 0;    // current cell pointer (0..3)
+    const CORE_TYPES = ["Attack", "Heal", "Buff", "Debuff", "Status"]; // canonical types
+    Ante._roundPlan = [];   // e.g., laneSize() cells like ["Attack","Heal","..."]
+    Ante._roundIndex = 0;    // current cell pointer (0..laneSize-1)
     Ante._laneDormant = false;// true when lane sleeps (e.g., after fill/wrong)
 
     // ---- Random pool & UI overrides ----
@@ -149,32 +201,31 @@
     //==========================================================================
     const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 
-    /** Reset the global queue contents to "None" and index to 0. */
     function _resetToNone() {
         Ante._globalQueue = Array(Ante._maxQueueSize).fill("None");
         Ante._writeIdx = 0;
     }
 
-    /** Count entries in the global queue that are not "None". */
     function _countNonNone() {
         let c = 0; for (const v of Ante._globalQueue) if (v !== "None") c++; return c;
     }
 
-    /** Auto-update the badge count (either non-"None" count or max size). */
     Ante._updateBadgeAuto = () => {
         if (!Ante._badgeManual) {
             Ante._badgeNumber = badgeIsNonNone ? _countNonNone() : Ante._maxQueueSize;
         }
     };
 
-    /** Ask Scene_Battle's Ante manager to refresh now (safe if not present). */
     function _requestHudRefresh() {
         const s = SceneManager._scene;
         if (s && s._Ante && s._Ante.forceRefresh) s._Ante.forceRefresh();
     }
 
-    // ---- meta tag readers (defensive against missing/invalid input) ----
-    function readMetaNumber(meta, key, def = 0) { if (!meta) return def; const raw = meta[key]; if (raw == null) return def; const n = Number(raw); return isNaN(n) ? def : n; }
+    function readMetaNumber(meta, key, def = 0) {
+        if (!meta) return def;
+        const raw = meta[key]; if (raw == null) return def;
+        const n = Number(raw); return isNaN(n) ? def : n;
+    }
     function readMetaInt(meta, key, def = 0) { return Math.floor(readMetaNumber(meta, key, def)); }
     function readMetaCsvInts(meta, key) {
         if (!meta || meta[key] == null) return [];
@@ -185,12 +236,10 @@
     //==========================================================================
     // Subtype / combo parsing helpers
     //==========================================================================
-    /** Resolve Sub_Skill_Type (or map core attack/guard ids); default "None". */
     function readSubtype(item) {
         const t = item?.meta?.Sub_Skill_Type;
         if (t && typeof t === "string" && t.length) return t.trim();
 
-        // Fallbacks for default Attack/Guard command skills
         if ($dataSystem && item) {
             if (item.id === $dataSystem.attackSkillId) return "Attack";
             if (item.id === $dataSystem.guardSkillId) return "Hold";
@@ -198,27 +247,23 @@
         return "None";
     }
 
-    /** True if subtype is declared as any combo variant (".c" or explicit "combo"). */
     function isComboType(subType) {
         if (!subType) return false;
         if (String(subType).toLowerCase() === "combo") return true;
         return /\.c$/i.test(String(subType));
     }
 
-    /** Remove trailing ".c" (case-insensitive); returns base or null if not a combo suffix. */
     function stripComboSuffix(subType) {
         const m = /^(.+?)\.c$/i.exec(String(subType || ""));
-               return m ? m[1] : null;
+        return m ? m[1] : null;
     }
 
-    /** Optional explicit combo target via meta (Combo_Subtype or similar). */
     function comboDeclaredSubtype(item) {
         const meta = item?.meta || {};
         const direct = meta.Combo_Subtype || meta.ComboAs || meta.Combo_as || stripComboSuffix(item?.meta?.Sub_Skill_Type);
         return direct ? String(direct).trim() : null;
     }
 
-    /** Parse <Ante: +N> or <Ante: =N> mid-turn controls on the item. */
     function parseAnteTag(item) {
         const raw = item?.meta?.Ante; if (raw == null) return null;
         const s = String(raw).trim();
@@ -233,80 +278,69 @@
     function _shuffle(a) { const b = a.slice(); for (let i = b.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0;[b[i], b[j]] = [b[j], b[i]]; } return b; }
     function _resetNextPool() { Ante._nextPool = CORE_TYPES.slice(); }
 
-    /** Start a new round (4 slots), seed first slot, clear per-round controls. */
+    /** Start a new round (laneSize slots), seed first slot, clear per-round controls. */
     function _startNewRound() {
-        Ante._roundPlan = ["None", "None", "None", "None"];
+        const size = laneSize();
+        Ante._roundPlan = new Array(size).fill("None");
         Ante._roundIndex = 0;
         Ante._laneDormant = false;
         Ante._activeTextOverride = null;
 
-        // Per-round controls (blacklist + forced-next type)
         Ante._roundBlacklist = [];
-        Ante._forcedNextType = null; // consumed by _ensureCurrentSlotFilled
+        Ante._forcedNextType = null;
 
         _resetNextPool();
         _ensureCurrentSlotFilled();
         _requestHudRefresh();
     }
 
-    /**
-     * NOTE: This function is duplicated below on purpose in the original file.
-     * The *second* definition overrides this one. We keep both to avoid changing
-     * the file's behavior. This first version is effectively inert at runtime.
-     */
+    // First definition kept for parity with original, but overridden below.
     function _clearLaneUntilNextTurn() {
         Ante._laneDormant = true;
         Ante._roundPlan = [];
         Ante._roundIndex = 0;
         Ante._activeTextOverride = null;
-
-        // reset blacklist when the lane sleeps
         Ante._roundBlacklist = [];
-
         _resetNextPool();
     }
 
-    /**
-     * Active definition: clear the lane and reset per-round controls.
-     * (This shadows the earlier duplicate by name; behavior unchanged.)
-     */
+    // Active definition.
     function _clearLaneUntilNextTurn() {
         Ante._laneDormant = true;
         Ante._roundPlan = [];
         Ante._roundIndex = 0;
         Ante._activeTextOverride = null;
 
-        // reset round-only controls
         Ante._roundBlacklist = [];
         Ante._forcedNextType = null;
 
         _resetNextPool();
     }
 
-    /** Current target type for the lane UI (fills slot if needed). */
     function _currentTarget() {
         if (Ante._laneDormant) return null;
-        if (!Array.isArray(Ante._roundPlan) || Ante._roundPlan.length !== 4) return null;
+        const size = laneSize();
+        if (!Array.isArray(Ante._roundPlan) || Ante._roundPlan.length !== size) return null;
         _ensureCurrentSlotFilled();
         return Ante._roundPlan[Ante._roundIndex] || null;
     }
 
-    /** Case-insensitive membership: whether a type remains in the next pool. */
     function _isTypeUp(typeName) {
         return Ante._nextPool.some(t => String(t).toLowerCase() === String(typeName).toLowerCase());
     }
 
-    /** Remove a type from next pool (case-insensitive). */
     function _removeFromNextPool(typeName) {
         const i = Ante._nextPool.findIndex(t => String(t).toLowerCase() === String(typeName).toLowerCase());
         if (i >= 0) Ante._nextPool.splice(i, 1);
     }
 
-    /** Lane snapshot for UI: past fixed, current maybe overridden, future "None". */
     function _targetLaneForUi() {
-        if (Ante._laneDormant || Ante._roundPlan.length !== 4) return ["None", "None", "None", "None"];
+        const size = laneSize();
+        if (Ante._laneDormant || Ante._roundPlan.length !== size) {
+            return new Array(size).fill("None");
+        }
         const arr = [];
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < size; i++) {
             let label = Ante._roundPlan[i];
             if (i === Ante._roundIndex && Ante._activeTextOverride) label = Ante._activeTextOverride;
             if (i < Ante._roundIndex) arr.push(Ante._roundPlan[i]);
@@ -316,10 +350,10 @@
         return arr;
     }
 
-    /** Ensure lane exists and the current slot is filled with an allowed type. */
     function ensureLaneReady() {
         if (Ante._laneDormant) return;
-        if (!Array.isArray(Ante._roundPlan) || Ante._roundPlan.length !== 4) {
+        const size = laneSize();
+        if (!Array.isArray(Ante._roundPlan) || Ante._roundPlan.length !== size) {
             _startNewRound();
             return;
         }
@@ -328,10 +362,8 @@
 
     /**
      * Push a label into the global fixed-size queue (respects queue blacklist).
-     * Clears the queue when write index wraps to 0 to preserve fixed-length behavior.
      */
     function _pushFixed(subtype) {
-        // Global queue blacklist (persisting across the battle/plugin lifetime)
         const blk = Array.isArray(Ante._queueBlacklist) ? Ante._queueBlacklist : [];
         const LOWER = s => String(s || "").toLowerCase();
         const valRaw = String(subtype || "None");
@@ -341,16 +373,12 @@
         Ante._globalQueue[Ante._writeIdx] = val;
         Ante._writeIdx = (Ante._writeIdx + 1) % Ante._maxQueueSize;
 
-        // On wrap-around, instantly clear all cells back to "None"
-        if (Ante._writeIdx === 0) _resetToNone();
-
-        // Auto badge update
         Ante._badgeManual = false;
         Ante._updateBadgeAuto();
     }
 
     //==========================================================================
-    // Public API (Ante.*): getters/setters, queue ops, construction mode
+    // Public API (Ante.*)
     //==========================================================================
 
     // ---- Ante gauge ----
@@ -377,14 +405,12 @@
 
     Ante.resetAnte = () => { Ante.setAnte(0); };
 
-    // ---- Dynamic damage steps (no header edits; defaults here) ----
-    //  - _dmgDealStep : +% per Ante level to damage DEALT by actors
-    //  - _dmgTakenStep: -% per Ante level to damage RECEIVED by actors (actors as targets)
-    Ante._dmgDealStep  = 0.05; // +5% per Ante by default
-    Ante._dmgTakenStep = 0.00; // 0% reduction per Ante by default
+    // ---- Dynamic damage steps ----
+    Ante._dmgDealStep = 0.05;
+    Ante._dmgTakenStep = 0.00;
 
     Ante.setDamageSteps = function (dealStep, takenStep) {
-        if (dealStep != null)  Ante._dmgDealStep  = Math.max(0, Number(dealStep)  || 0);
+        if (dealStep != null) Ante._dmgDealStep = Math.max(0, Number(dealStep) || 0);
         if (takenStep != null) Ante._dmgTakenStep = Math.max(0, Number(takenStep) || 0);
     };
 
@@ -432,17 +458,19 @@
     // ---- Badge manual set ----
     Ante.setBadge = (n) => { Ante._badgeNumber = Number(n) || 0; Ante._badgeManual = true; _requestHudRefresh(); };
 
-    // ---- Dynamic size (resets queue and auto badge) ----
+    // ---- Dynamic size (resets queue, badge, and lane size) ----
     Ante.setMaxSize = (n) => {
         const m = Math.max(1, Number(n) || 1);
         Ante._maxQueueSize = m;
+        Ante._laneSize = m;          // keep lane size in sync with queue size
         _resetToNone();
         Ante._badgeManual = false;
         Ante._updateBadgeAuto();
+        _startNewRound();            // rebuild lane with new size
         _requestHudRefresh();
     };
 
-    // ---- Queue construction session (seed content via commands) ----
+    // ---- Queue construction session ----
     Ante.beginConstruct = (opts = {}) => {
         Ante._constructing = true;
         if (opts.maxSize != null) Ante.setMaxSize(opts.maxSize);
@@ -453,61 +481,84 @@
     Ante.constructPush = (subtype) => { if (!Ante._constructing) return; _pushFixed(subtype); _requestHudRefresh(); };
     Ante.endConstruct = () => { Ante._constructing = false; _requestHudRefresh(); };
 
-    // ---- Lifecycle hooks (safe defaults if not supplied elsewhere) ----
+    // ---- Lifecycle hooks ----
     if (typeof Ante.onActorTurnStart !== "function") Ante.onActorTurnStart = function (_a) { };
-    if (typeof Ante.onActorMidTurn !== "function") Ante.onActorMidTurn = function (_a, item) {
-        // Apply <Ante: ...> tags immediately on selection (mid-turn)
-        const t = parseAnteTag(item);
-        if (t) {
-            if (t.op === "set") Ante.setAnte(t.val);
-            if (t.op === "add") Ante.addAnte(t.val);
-        }
-    };
+    if (typeof Ante.onActorMidTurn !== "function") Ante.onActorMidTurn = function (_a, _item) { };
     if (typeof Ante.onActorTurnEnd !== "function") Ante.onActorTurnEnd = function (_a) { };
 
     //==========================================================================
     // HUD classes (Window_Ante, Sprite_AnteBadge, AnteManager)
     //==========================================================================
-    /** Displays the 4-slot lane as "A | B | C | D" with coloring. */
     class Window_Ante extends Window_Base {
-        initialize(rect) { super.initialize(rect); this.refreshWith(); }
+        initialize(rect) {
+            super.initialize(rect);
+            this.refreshWith();
+        }
+
         refreshWith() {
             const lane = _targetLaneForUi();
             this.contents.clear();
 
-            // Compose "A | B | C | D" with color per segment
-            const sep = " | "; const pieces = [];
-            for (let i = 0; i < 4; i++) { pieces.push(lane[i]); if (i < 3) pieces.push(sep); }
-            const textFull = pieces.join("");
+            const iconW = ImageManager.iconWidth || 32;
+            const iconH = ImageManager.iconHeight || 32;
+            const gap = 12;
 
-            const lh = this.lineHeight();
-            const y = Math.max(0, Math.floor((this.contentsHeight() - lh) / 2));
-            const totalW = this.textWidth(textFull);
+            const cols = lane.length || 1;
+            const cellW = iconW + gap;
+            const totalW = (cellW * cols) - gap;
             const x0 = Math.max(0, Math.floor((this.contentsWidth() - totalW) / 2));
-            let x = x0;
+            const iconY = Math.max(0, Math.floor((this.contentsHeight() - iconH) / 2));
 
-            for (let i = 0; i < 4; i++) {
+            for (let i = 0; i < cols; i++) {
                 const label = lane[i];
-                const isCurrent = (!Ante._laneDormant && Ante._roundPlan.length === 4 && i === Ante._roundIndex && label !== "None");
+                const isCurrent =
+                    (!Ante._laneDormant &&
+                        Ante._roundPlan.length === laneSize() &&
+                        i === Ante._roundIndex &&
+                        label !== "None");
 
-                if (isCurrent) this.changeTextColor(ColorManager.systemColor());     // highlight current slot
-                else if (label === "None") this.changeTextColor(ColorManager.textColor(7)); // dim empty
-                else this.changeTextColor(ColorManager.normalColor());
+                const x = x0 + i * cellW;
 
-                this.drawText(label, x, y, this.textWidth(label), "left");
-                x += this.textWidth(label);
+                if (isCurrent) {
+                    const pad = 4;
 
-                if (i < 3) {
-                    this.changeTextColor(ColorManager.normalColor());
-                    this.drawText(sep, x, y, this.textWidth(sep), "left");
-                    x += this.textWidth(sep);
+                    this.contents.paintOpacity = 128;
+                    this.contents.fillRect(
+                        x - pad,
+                        iconY - pad,
+                        iconW + pad * 2,
+                        iconH + pad * 2,
+                        ColorManager.systemColor()
+                    );
+                    this.contents.paintOpacity = 255;
+
+                    const underlineY = iconY + iconH + 2;
+                    this.contents.fillRect(
+                        x,
+                        underlineY,
+                        iconW,
+                        2,
+                        ColorManager.systemColor()
+                    );
+                }
+
+                const iconIndex = subtypeIconIndex(label);
+
+                if (iconIndex > 0) {
+                    this.drawIcon(iconIndex, x, iconY);
+                } else {
+                    const isNone = (label === "None");
+                    this.changeTextColor(
+                        isNone ? ColorManager.textColor(7) : ColorManager.normalColor()
+                    );
+                    this.drawText(label, x, iconY, iconW + gap, "center");
                 }
             }
+
             this.resetTextColor();
         }
     }
 
-    /** Circular badge sprite that shows the current Ante numeric value. */
     class Sprite_AnteBadge extends Sprite {
         constructor() { super(new Bitmap(110, 110)); this._val = NaN; this._r = 44; this.anchor.set(0.5, 0.5); }
         setValue(v) { if (this._val !== v) { this._val = v; this._redraw(); } }
@@ -532,19 +583,15 @@
         }
     }
 
-    /**
-     * Orchestrates the HUD window + badge; listens for changes and re-renders.
-     * Create one manager per Scene_Battle; destroyed at scene end / battle end.
-     */
     class AnteManager {
         constructor(scene, opts = {}) {
             this._scene = scene;
             this._opts = Object.assign({ width: 420, lines: 1, pad: 16 }, opts);
             this._win = null;
             this._badge = null;
-            this._cacheKey = "";    // lane snapshot cache
-            this._cacheAnte = -9999; // ante value cache
-            this._popups = [];    // +/- popup sprites
+            this._cacheKey = "";
+            this._cacheAnte = -9999;
+            this._popups = [];
         }
         create() {
             const rect = _panelRect(this._scene);
@@ -554,7 +601,6 @@
             this._badge = new Sprite_AnteBadge();
             this._badge.setRadius(_badgeRadius());
 
-            // Prefer spriteset for z-order; fallback to scene if needed
             if (this._scene._spriteset) this._scene._spriteset.addChild(this._badge);
             else this._scene.addChildAt(this._badge, 0);
 
@@ -566,7 +612,6 @@
             const pose = _badgePose(this._win, this._badge._r);
             this._badge.x = pose.x; this._badge.y = pose.y;
         }
-        /** Force full redraw next update tick. */
         forceRefresh() {
             this._cacheKey = "";
             this._cacheAnte = -9999;
@@ -574,7 +619,6 @@
             if (this._badge) this._badge.setValue(Ante.getAnte());
             this._positionBadge();
         }
-        /** Per-frame update: re-render when state key or ante value changed. */
         update() {
             const laneKey = `L:${Ante._laneDormant ? "D" : "A"}:${Ante._roundPlan.join(",")}:${Ante._roundIndex}:${Ante._activeTextOverride || ""}`;
             const anteVal = Ante.getAnte();
@@ -586,7 +630,6 @@
                 this._positionBadge();
             }
 
-            // Animate popups (float up, fade out)
             if (this._popups.length) {
                 for (let i = this._popups.length - 1; i >= 0; i--) {
                     const p = this._popups[i];
@@ -601,7 +644,6 @@
                 }
             }
         }
-        /** Spawn a small floating "+N"/"-N" text near the badge. */
         spawnPopup(diff) {
             if (!this._badge || !this._badge.parent || diff === 0) return;
             const text = (diff > 0 ? "+" : "") + diff;
@@ -619,30 +661,26 @@
             this._popups.push(popup);
             this._badge.parent.addChild(s);
         }
-        /** Remove all HUD nodes from the scene and clear references. */
         destroy() {
-            // Remove popups
             for (const p of this._popups) {
                 p.sprite.bitmap.clear();
                 if (p.sprite.parent) p.sprite.parent.removeChild(p.sprite);
             }
             this._popups.length = 0;
 
-            // Remove badge
             if (this._badge) {
                 this._badge.bitmap?.clear();
                 if (this._scene?._spriteset) this._scene._spriteset.removeChild(this._badge);
             }
             this._badge = null;
 
-            // Remove window
             this._win = null;
             this._scene = null;
         }
     }
 
     //==========================================================================
-    // Scene_Battle wiring (create/update/destroy HUD; start/startActor hooks)
+    // Scene_Battle wiring
     //==========================================================================
     {
         const _createAllWindows = Scene_Battle.prototype.createAllWindows;
@@ -675,28 +713,25 @@
     }
 
     //==========================================================================
-    // Turn lifecycle: start command, mid-turn tap, endAction resolution
+    // Turn lifecycle
     //==========================================================================
     {
-        // -- Turn Start: allow user hook; ensure round exists and seeded
         const _startActorCommandSelection = Scene_Battle.prototype.startActorCommandSelection;
         Scene_Battle.prototype.startActorCommandSelection = function () {
             const a = BattleManager.actor && BattleManager.actor();
             if (a && a.isActor && a.isActor()) {
                 try { Ante.onActorTurnStart(a); } catch (e) { console.warn("Ante turnStart hook failed:", e); }
-                if (Ante._laneDormant || Ante._roundPlan.length !== 4) _startNewRound();
+                if (Ante._laneDormant || Ante._roundPlan.length !== laneSize()) _startNewRound();
                 _requestHudRefresh();
             }
             _startActorCommandSelection.call(this);
         };
 
-        // -- Mid-turn: when commands/skills are confirmed (selection moment)
         const mid = (actor, item) => {
             try { Ante.onActorMidTurn(actor, item); } catch (e) { console.warn("Ante midTurn hook failed:", e); }
             _requestHudRefresh();
         };
 
-        // Tap mid hook for default Attack/Guard and selected Skill/Item
         const _cmdAttack = Scene_Battle.prototype.commandAttack;
         Scene_Battle.prototype.commandAttack = function () {
             const a = BattleManager.actor && BattleManager.actor();
@@ -729,38 +764,28 @@
             _onItemOk.call(this);
         };
 
-        /**
-         * Convert a used item + subtype into the queue label to log.
-         * For combos: prefer explicit Combo_Subtype > ".c" base > lane target.
-         */
         function _queueLabelForUse(item, sub, targetType) {
             if (isComboType(sub)) {
-                const decl = comboDeclaredSubtype(item);            // 1) explicit meta
+                const decl = comboDeclaredSubtype(item);
                 if (decl) return String(decl);
-                const stripped = stripComboSuffix(sub);            // 2) "Attack.c" -> "Attack"
+                const stripped = stripComboSuffix(sub);
                 if (stripped) return stripped;
-                if (targetType) return String(targetType);         // 3) fallback to lane
+                if (targetType) return String(targetType);
             }
             return String(sub || "None");
         }
 
-        /**
-         * Fill current lane slot if empty:
-         *  - honors per-round blacklist and already-used types
-         *  - honors a one-shot forced-next type (Ante._forcedNextType) if valid
-         */
         function _ensureCurrentSlotFilled() {
             if (Ante._laneDormant) return;
             const i = (Ante._roundIndex | 0);
-            if (!Array.isArray(Ante._roundPlan) || Ante._roundPlan.length !== 4) return;
-            if (i < 0 || i >= 4) return;
+            const size = laneSize();
+            if (!Array.isArray(Ante._roundPlan) || Ante._roundPlan.length !== size) return;
+            if (i < 0 || i >= size) return;
 
-            // Already filled? leave it as-is.
             if (Ante._roundPlan[i] && Ante._roundPlan[i] !== "None") return;
 
             const LOWER = s => String(s || "").toLowerCase();
 
-            // Compute allowed set = CORE_TYPES \ {used so far U round blacklist}
             const used = new Set();
             for (let j = 0; j < i; j++) {
                 const v = String(Ante._roundPlan[j] || "None");
@@ -769,7 +794,6 @@
             const banned = new Set((Ante._roundBlacklist || []).map(s => LOWER(s)));
             const allowed = CORE_TYPES.filter(t => !used.has(LOWER(t)) && !banned.has(LOWER(t)));
 
-            // Honor forced-next latch if valid & allowed, then consume it
             if (Ante._forcedNextType) {
                 const forced = String(Ante._forcedNextType);
                 if (CORE_TYPES.some(t => LOWER(t) === LOWER(forced)) && !used.has(LOWER(forced)) && !banned.has(LOWER(forced))) {
@@ -777,11 +801,9 @@
                     Ante._forcedNextType = null;
                     return;
                 }
-                // Otherwise drop the request
                 Ante._forcedNextType = null;
             }
 
-            // Choose a random allowed type or "None" if none available
             if (allowed.length > 0) {
                 const idx = (Math.random() * allowed.length) | 0;
                 Ante._roundPlan[i] = String(allowed[idx]);
@@ -790,33 +812,29 @@
             }
         }
 
-        /** Overwrite the *current* lane label directly (used for combos UI). */
         function _rewriteCurrentLaneLabel(newLabel) {
             if (Ante._laneDormant) return;
             const i = (Ante._roundIndex | 0);
-            if (Array.isArray(Ante._roundPlan) && Ante._roundPlan.length === 4 && i >= 0 && i < 4) {
+            const size = laneSize();
+            if (Array.isArray(Ante._roundPlan) && Ante._roundPlan.length === size && i >= 0 && i < size) {
                 Ante._roundPlan[i] = String(newLabel || "None");
             }
         }
 
-        /**
-         * Add a type to this round's blacklist and scrub it from future cells.
-         * (Future "Attack" -> "None" now; slot will be refilled when it becomes current.)
-         */
         function _blacklistRoundType(typeName) {
             if (!typeName) return;
             const t = String(typeName);
 
-            // Add to per-round blacklist (case-insensitive)
             Ante._roundBlacklist = Ante._roundBlacklist || [];
             if (!Ante._roundBlacklist.some(x => String(x).toLowerCase() === t.toLowerCase())) {
                 Ante._roundBlacklist.push(t);
             }
 
-            // Scrub future cells immediately for UI feedback
-            if (!Array.isArray(Ante._roundPlan) || Ante._roundPlan.length !== 4) return;
+            if (!Array.isArray(Ante._roundPlan)) return;
+            const size = laneSize();
+            if (Ante._roundPlan.length !== size) return;
             const start = (Ante._roundIndex | 0) + 1;
-            for (let i = start; i < 4; i++) {
+            for (let i = start; i < size; i++) {
                 if (String(Ante._roundPlan[i]).toLowerCase() === t.toLowerCase()) {
                     Ante._roundPlan[i] = "None";
                 }
@@ -824,7 +842,6 @@
             _requestHudRefresh();
         }
 
-        // -- endAction: the authoritative resolution point for a used skill/item
         const _endAction = BattleManager.endAction;
         BattleManager.endAction = function () {
             try {
@@ -834,11 +851,9 @@
                     if (item && (DataManager.isSkill(item) || DataManager.isItem(item))) {
                         let sub = readSubtype(item);
 
-                        // Prepare lane/target FIRST so any logic below can rely on it
                         ensureLaneReady();
                         const targetType = _currentTarget();
 
-                        // === HOLD: log "Hold", call end hook, do not advance lane/ante ===
                         if (String(sub).toLowerCase() === "hold") {
                             _pushFixed("Hold");
                             Ante._activeTextOverride = null;
@@ -847,14 +862,13 @@
                             return _endAction.call(this);
                         }
 
-                        // Correctness evaluation (combos are wild; some add extra hit)
                         let correct = false, extraComboHit = false;
                         if (targetType) {
                             if (isComboType(sub)) {
-                                correct = true; // combos match any target
+                                correct = true;
                                 const comboSub = comboDeclaredSubtype(item);
                                 if (comboSub && String(comboSub).toLowerCase() === String(targetType).toLowerCase()) {
-                                    extraComboHit = true; // declared subtype matches lane target
+                                    extraComboHit = true;
                                 }
                             } else if (
                                 CORE_TYPES.includes(sub) &&
@@ -864,45 +878,38 @@
                             }
                         }
 
-                        // === Attack.c combo bonus (+2), queue logs "Attack", blacklist that type ===
                         let attackCbonusApplied = false;
                         const isAttackC = (String(item.name || "").toLowerCase() === "attack.c");
                         if (isAttackC) {
                             sub = "Attack";
                             Ante._activeTextOverride = "Attack";
-                            Ante.addAnte(2);               // timing aligned to endAction
+                            Ante.addAnte(2);
                             attackCbonusApplied = true;
 
                             _rewriteCurrentLaneLabel("Attack");
                             _blacklistRoundType("Attack");
                         }
 
-                        // Queue label to log (resolves combos to base/declared/target)
                         const labelForQueue = _queueLabelForUse(item, sub, targetType);
 
-                        // Any combo blacklists its resolved base for the rest of the round
                         if (isComboType(sub)) {
                             _blacklistRoundType(labelForQueue);
                         }
 
-                        // If resolved differs from target, rewrite lane cell for immediate UI
                         if (targetType && (isComboType(sub) || String(labelForQueue).toLowerCase() !== String(targetType).toLowerCase())) {
                             _rewriteCurrentLaneLabel(labelForQueue);
                             _requestHudRefresh();
                         }
 
-                        // === Extra per-item meta controls applied at resolution time ===
-                        // <ForceNextAnteSkill: Attack>
                         (function applyForceNext() {
                             const raw = item?.meta?.ForceNextAnteSkill;
                             if (!raw) return;
                             const forced = String(raw).trim();
                             if (CORE_TYPES.some(t => t.toLowerCase() === forced.toLowerCase())) {
-                                Ante._forcedNextType = forced; // consumed by _ensureCurrentSlotFilled
+                                Ante._forcedNextType = forced;
                             }
                         })();
 
-                        // <BlacklistAnteType: Attack, Heal>
                         (function applyRoundBlacklist() {
                             const raw = item?.meta?.BlacklistAnteType;
                             if (!raw) return;
@@ -910,9 +917,6 @@
                             for (const t of list) _blacklistRoundType(t);
                         })();
 
-                        // <QueueBlacklistAdd: Attack, Heal>
-                        // <QueueBlacklistRemove: Attack>
-                        // <QueueBlacklistClear: true>
                         (function applyQueueBlacklistEdits() {
                             const addRaw = item?.meta?.QueueBlacklistAdd;
                             if (addRaw) {
@@ -930,12 +934,11 @@
                             }
                         })();
 
-                        // Log resolved label to global queue (obeys global queue blacklist)
                         _pushFixed(labelForQueue);
 
-                        // ---- Lane outcome: advance, reset, or sleep ----
+                        const size = laneSize();
+
                         if (!targetType) {
-                            // No lane set => penalize partial streak then reset
                             const hitsSoFar = Ante._roundIndex || 0;
                             if (hitsSoFar > 0) Ante.addAnte(-2 * hitsSoFar);
                             _startNewRound();
@@ -947,19 +950,25 @@
                             if (laneGain > 0) {
                                 Ante.addAnte(laneGain);
                                 Ante._roundIndex = (Ante._roundIndex || 0) + 1;
-                                if (Ante._roundIndex >= 4) {
-                                    _clearLaneUntilNextTurn(); // round complete
+                                if (Ante._roundIndex >= size) {
+                                    _clearLaneUntilNextTurn();
                                 } else {
-                                    _ensureCurrentSlotFilled(); // honor forced-next if present
+                                    _ensureCurrentSlotFilled();
                                 }
                             } else {
-                                // Wrong skill => rescind partial streak and reset
                                 const hitsSoFar = Ante._roundIndex || 0;
                                 if (hitsSoFar > 0) Ante.addAnte(-2 * hitsSoFar);
                                 _startNewRound();
                             }
                             Ante._activeTextOverride = null;
                         }
+
+                        (function applyAnteTagAtEnd() {
+                            const t = parseAnteTag(item);
+                            if (!t) return;
+                            if (t.op === "set") Ante.setAnte(t.val);
+                            if (t.op === "add") Ante.addAnte(t.val);
+                        })();
                     }
                 }
             } catch (e) {
@@ -972,21 +981,14 @@
         // Damage scaling & extra effects based on Ante level
         //==========================================================================
 
-        // Healing scaling knobs (default to the damage knobs if not set)
-        if (Ante._healDealStep  === undefined) Ante._healDealStep  = (Ante._dmgDealStep  != null ? Ante._dmgDealStep  : 0.05);
+        if (Ante._healDealStep === undefined) Ante._healDealStep = (Ante._dmgDealStep != null ? Ante._dmgDealStep : 0.05);
         if (Ante._healTakenStep === undefined) Ante._healTakenStep = (Ante._dmgTakenStep != null ? Ante._dmgTakenStep : 0.00);
 
-        // Optional: runtime setter if you want different heal scaling than damage
         Ante.setHealingSteps = function (dealStep, takenStep) {
-            if (dealStep  != null) Ante._healDealStep  = Math.max(0, Number(dealStep)  || 0);
+            if (dealStep != null) Ante._healDealStep = Math.max(0, Number(dealStep) || 0);
             if (takenStep != null) Ante._healTakenStep = Math.max(0, Number(takenStep) || 0);
         };
 
-
-        // === Dynamic Ante damage scaling ===
-        // Separate knobs:
-        //  - Ante._dmgDealStep  : bonus to damage DEALT by actors (per Ante level)
-        //  - Ante._dmgTakenStep : reduction to damage RECEIVED by actors (per Ante level)
         const _makeDamageValue = Game_Action.prototype.makeDamageValue;
         Game_Action.prototype.makeDamageValue = function (target, critical) {
             let value = _makeDamageValue.call(this, target, critical);
@@ -996,38 +998,30 @@
 
             const subject = this.subject();
             const isSubjectActor = !!(subject && subject.isActor && subject.isActor());
-            const isTargetActor  = !!(target  && target.isActor  && target.isActor());
+            const isTargetActor = !!(target && target.isActor && target.isActor());
 
-         if (value > 0) {
-                // --- Damage ---
-                // 1) Damage DEALT by actors: increase by (1 + dealStep * ante)
+            if (value > 0) {
                 if (isSubjectActor && Ante._dmgDealStep > 0) {
-                   const mulDeal = 1 + (Ante._dmgDealStep * ante);
-                   value = Math.round(value * mulDeal);
-               }
-               // 2) Damage RECEIVED by actors: reduce by (1 - takenStep * ante), clamped ≥ 0
+                    const mulDeal = 1 + (Ante._dmgDealStep * ante);
+                    value = Math.round(value * mulDeal);
+                }
                 if (isTargetActor && Ante._dmgTakenStep > 0) {
                     const mulTaken = Math.max(0, 1 - (Ante._dmgTakenStep * ante));
-                   value = Math.round(value * mulTaken);
-               }
+                    value = Math.round(value * mulTaken);
+                }
             } else if (value < 0) {
-               // --- Healing (value is negative; multiplying by >1 increases healing magnitude) ---
-               // 1) Healing DEALT by actors: increase by (1 + healDealStep * ante)
-               if (isSubjectActor && Ante._healDealStep > 0) {
-                   const mulHealGive = 1 + (Ante._healDealStep * ante);
-                    value = Math.round(value * mulHealGive); // value is negative -> more healing
-               }
-                // 2) Healing RECEIVED by actors: increase by (1 + healTakenStep * ante)
+                if (isSubjectActor && Ante._healDealStep > 0) {
+                    const mulHealGive = 1 + (Ante._healDealStep * ante);
+                    value = Math.round(value * mulHealGive);
+                }
                 if (isTargetActor && Ante._healTakenStep > 0) {
                     const mulHealRecv = 1 + (Ante._healTakenStep * ante);
-                    value = Math.round(value * mulHealRecv); // value is negative -> more healing
+                    value = Math.round(value * mulHealRecv);
                 }
             }
             return value;
         };
 
-
-        // ---- Status chance scaling & extra turns via meta ----
         function anteChanceMultiplierForItem(item) {
             if (!item || !item.meta) return 1;
             const a = Ante.getAnte ? Ante.getAnte() : 0; if (a <= 0) return 1;
@@ -1077,7 +1071,6 @@
             }
         };
 
-        // ---- Extra item effects gated by an Ante threshold ----
         function itemAnteThreshold(item) { if (!item || !item.meta) return -1; return readMetaInt(item.meta, "ExtraAnteEffectLv", -1); }
         function anteThresholdMet(item) { const th = itemAnteThreshold(item); if (th < 0) return false; const a = Ante.getAnte ? Ante.getAnte() : 0; return a >= th; }
         function costRateIfMet(skill) { if (!skill || !skill.meta) return 1; if (!anteThresholdMet(skill)) return 1; const r = readMetaNumber(skill.meta, "ExtraAnteCostRate", 1); return (r > 0) ? r : 1; }
@@ -1136,7 +1129,6 @@
             }
         }
 
-        // Wrap the final application to inject extra effects post-damage
         const _apply = Game_Action.prototype.apply;
         Game_Action.prototype.apply = function (target) {
             _apply.call(this, target);
@@ -1146,7 +1138,6 @@
             try { runExtraCommonEventIfAny(this); } catch (_e) { }
         };
 
-        // Plugin commands (MZ) — optional runtime tuning without header edits
         if (PluginManager.registerCommand) {
             PluginManager.registerCommand(PLUGIN_NAME, "AnteBeginConstruct", args => {
                 const maxSize = args?.maxSize != null ? Number(args.maxSize) : null;
@@ -1165,17 +1156,16 @@
                 const v = Number(args?.value || 0);
                 Ante.setBadge(v); _requestHudRefresh();
             });
-            // Undocumented command (no header edits): set damage steps at runtime.
             PluginManager.registerCommand(PLUGIN_NAME, "AnteSetDamageSteps", args => {
-                const deal  = (args && args.dealtStep  != null) ? Number(args.dealtStep)  : null;
+                const deal = (args && args.dealtStep != null) ? Number(args.dealtStep) : null;
                 const taken = (args && args.takenStep != null) ? Number(args.takenStep) : null;
                 Ante.setDamageSteps(deal, taken);
             });
         }
-    } // <-- closes Turn lifecycle block
+    }
 
     //==========================================================================
-    // Extra cleanup guarantees when battle ends (window + badge removal)
+    // Extra cleanup when battle ends
     //==========================================================================
     {
         const _endBattle = BattleManager.endBattle;
@@ -1192,7 +1182,6 @@
             return _endBattle.call(this, result);
         };
 
-        // Safety net (if Scene_Battle terminates through a different path)
         const _terminateBattleScene = Scene_Battle.prototype.terminate;
         Scene_Battle.prototype.terminate = function () {
             try {
@@ -1210,11 +1199,7 @@
     //==========================================================================
     // AnteManager hard destroy override (kept identical to original behavior)
     //==========================================================================
-    // NOTE: This definition intentionally duplicates the cleanup logic performed
-    // in the class's destroy() method. It is preserved verbatim to avoid any
-    // functional differences from your original file.
     AnteManager.prototype.destroy = function () {
-        // kill popups
         for (const p of this._popups) {
             try { p.sprite.bitmap.clear(); } catch (_e) { }
             if (p.sprite && p.sprite.parent && p.sprite.parent.removeChild) {
@@ -1223,7 +1208,6 @@
         }
         this._popups.length = 0;
 
-        // remove badge sprite
         if (this._badge) {
             try { this._badge.bitmap && this._badge.bitmap.clear(); } catch (_e) { }
             const bParent = this._badge.parent;
@@ -1231,7 +1215,6 @@
         }
         this._badge = null;
 
-        // remove window from window layer (important!)
         if (this._win) {
             try {
                 this._win.hide();
@@ -1246,11 +1229,10 @@
     };
 
     //==========================================================================
-    // Queue blacklist public API (persistent across battle/plugin lifetime)
+    // Queue blacklist public API
     //==========================================================================
     Ante._queueBlacklist = Ante._queueBlacklist || [];
 
-    /** Add one or more types to the queue blacklist (case-insensitive). */
     Ante.queueBlacklistAdd = function (...types) {
         if (!Ante._queueBlacklist) Ante._queueBlacklist = [];
         for (const t of types.flat()) {
@@ -1263,7 +1245,6 @@
         _requestHudRefresh();
     };
 
-    /** Remove one or more types from the queue blacklist (case-insensitive). */
     Ante.queueBlacklistRemove = function (...types) {
         if (!Ante._queueBlacklist || !Ante._queueBlacklist.length) return;
         const removeSet = new Set(types.flat().map(x => String(x).toLowerCase()));
@@ -1271,7 +1252,6 @@
         _requestHudRefresh();
     };
 
-    /** Clear the queue blacklist entirely. */
     Ante.queueBlacklistClear = function () {
         Ante._queueBlacklist = [];
         _requestHudRefresh();
