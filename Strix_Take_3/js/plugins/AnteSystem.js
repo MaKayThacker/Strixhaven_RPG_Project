@@ -991,35 +991,9 @@
 
         const _makeDamageValue = Game_Action.prototype.makeDamageValue;
         Game_Action.prototype.makeDamageValue = function (target, critical) {
-            let value = _makeDamageValue.call(this, target, critical);
-
-            const ante = (window.Ante && typeof Ante.getAnte === "function") ? (Ante.getAnte() | 0) : 0;
-            if (ante <= 0) return value;
-
-            const subject = this.subject();
-            const isSubjectActor = !!(subject && subject.isActor && subject.isActor());
-            const isTargetActor = !!(target && target.isActor && target.isActor());
-
-            if (value > 0) {
-                if (isSubjectActor && Ante._dmgDealStep > 0) {
-                    const mulDeal = 1 + (Ante._dmgDealStep * ante);
-                    value = Math.round(value * mulDeal);
-                }
-                if (isTargetActor && Ante._dmgTakenStep > 0) {
-                    const mulTaken = Math.max(0, 1 - (Ante._dmgTakenStep * ante));
-                    value = Math.round(value * mulTaken);
-                }
-            } else if (value < 0) {
-                if (isSubjectActor && Ante._healDealStep > 0) {
-                    const mulHealGive = 1 + (Ante._healDealStep * ante);
-                    value = Math.round(value * mulHealGive);
-                }
-                if (isTargetActor && Ante._healTakenStep > 0) {
-                    const mulHealRecv = 1 + (Ante._healTakenStep * ante);
-                    value = Math.round(value * mulHealRecv);
-                }
-            }
-            return value;
+            // Ante no longer modifies damage here; all scaling is handled
+            // in the VisuStella Custom Damage Eval box instead.
+            return _makeDamageValue.call(this, target, critical);
         };
 
         function anteChanceMultiplierForItem(item) {

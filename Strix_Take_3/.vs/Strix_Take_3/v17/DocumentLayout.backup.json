@@ -7,12 +7,12 @@
       "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:js\\plugins\\AnteSystem.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}"
     },
     {
-      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\data\\Skills.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}",
-      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:data\\Skills.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}"
-    },
-    {
       "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\data\\Classes.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}",
       "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:data\\Classes.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\data\\Skills.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:data\\Skills.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}"
     }
   ],
   "DocumentGroupContainers": [
@@ -34,29 +34,27 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 1,
+              "DocumentIndex": 2,
               "Title": "Skills.json",
               "DocumentMoniker": "C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\data\\Skills.json",
               "RelativeDocumentMoniker": "data\\Skills.json",
               "ToolTip": "C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\data\\Skills.json",
               "RelativeToolTip": "data\\Skills.json",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAABgAAAAAAAAAAAAAAA==",
+              "ViewState": "AgIAACsAAAAAAAAAAAAIwDcAAADyAQAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001642|",
-              "WhenOpened": "2025-11-14T03:30:11.605Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-11-14T03:30:11.605Z"
             },
             {
               "$type": "Document",
-              "DocumentIndex": 2,
+              "DocumentIndex": 1,
               "Title": "Classes.json",
               "DocumentMoniker": "C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\data\\Classes.json",
               "RelativeDocumentMoniker": "data\\Classes.json",
               "ToolTip": "C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\data\\Classes.json",
               "RelativeToolTip": "data\\Classes.json",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAQAAABgDQAAAAAAAA==",
+              "ViewState": "AgIAAAUAAAAAAAAAAAD4vwUAAAAHAwAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001642|",
-              "WhenOpened": "2025-11-14T03:29:48.038Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-11-14T03:29:48.038Z"
             },
             {
               "$type": "Document",
@@ -66,7 +64,7 @@
               "RelativeDocumentMoniker": "js\\plugins\\AnteSystem.js",
               "ToolTip": "C:\\Users\\Pengu\\Desktop\\Strix Take 3, For Real\\Strix_Take_3\\js\\plugins\\AnteSystem.js",
               "RelativeToolTip": "js\\plugins\\AnteSystem.js",
-              "ViewState": "AgIAALcEAAAAAAAAAAAgwOwEAAAAAAAAAAAAAA==",
+              "ViewState": "AgIAANIDAAAAAAAAAAAqwOQDAAAKAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001646|",
               "WhenOpened": "2025-11-12T02:29:23.75Z",
               "EditorCaption": ""
